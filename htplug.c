@@ -22,15 +22,12 @@
 #include <string.h>
 #include <deadbeef/deadbeef.h>
 
-#include <psx.h>
-#include <iop.h>
-#include <r3000.h>
-#include <bios.h>
+#include <sega.h>
+#include <satsound.h>
+#include <dcsound.h>
+#include <yam.h>
 
 #include <psflib.h>
-#include <psf2fs.h>
-
-#include <mkhebios.h>
 
 # define strdup(s)							      \
   (__extension__							      \
@@ -41,7 +38,7 @@
       (char *) memcpy (__new, __old, __len);				      \
     }))
 
-extern DB_decoder_t he_plugin;
+extern DB_decoder_t ht_plugin;
 
 #define trace(...) { fprintf(stderr, __VA_ARGS__); }
 //#define trace(fmt,...)
@@ -180,13 +177,11 @@ static void free_tags( struct psf_tag * tags )
 
 struct psf_load_state
 {
-    void * emu;
-
-    int first;
+    uint8_t * data;
+    size_t data_size;
 
     int tag_song_ms;
     int tag_fade_ms;
-    int refresh;
 
     int utf8;
 
@@ -207,11 +202,6 @@ static int psf_info_meta(void * context, const char * name, const char * value)
         unsigned long n = parse_time_crap( value );
         if ( n != BORK_TIME ) state->tag_fade_ms = n;
     }
-    else if ( !strcasecmp( name, "_refresh" ) )
-    {
-        char * end;
-        state->refresh = strtoul( value, &end, 10 );
-    }
 
     return 0;
 }
@@ -230,10 +220,9 @@ static int psf_info_dump(void * context, const char * name, const char * value)
         unsigned long n = parse_time_crap( value );
         if ( n != BORK_TIME ) state->tag_fade_ms = n;
     }
-    else if ( !strcasecmp( name, "_refresh" ) )
+    else if ( !strcasecmp( name, "utf8" ) )
     {
-        char * end;
-        state->refresh = strtoul( value, &end, 10 );
+        state->utf8 = 1;
     }
     else if ( *name != '_' )
     {
@@ -244,68 +233,55 @@ static int psf_info_dump(void * context, const char * name, const char * value)
 
         state->tags = add_tag( state->tags, name, value );
     }
-    else if ( !strcasecmp( name, "utf8" ) )
-    {
-        state->utf8 = 1;
-    }
 
     return 0;
 }
 
-typedef struct {
-    uint32_t pc0;
-    uint32_t gp0;
-    uint32_t t_addr;
-    uint32_t t_size;
-    uint32_t d_addr;
-    uint32_t d_size;
-    uint32_t b_addr;
-    uint32_t b_size;
-    uint32_t s_ptr;
-    uint32_t s_size;
-    uint32_t sp,fp,gp,ret,base;
-} exec_header_t;
-
-typedef struct {
-    char key[8];
-    uint32_t text;
-    uint32_t data;
-    exec_header_t exec;
-    char title[60];
-} psxexe_hdr_t;
-
-int psf1_load(void * context, const uint8_t * exe, size_t exe_size,
+int sdsf_load(void * context, const uint8_t * exe, size_t exe_size,
                                   const uint8_t * reserved, size_t reserved_size)
 {
+    if ( exe_size < 4 ) return -1;
+
     struct psf_load_state * state = ( struct psf_load_state * ) context;
 
-    psxexe_hdr_t *psx = (psxexe_hdr_t *) exe;
+    uint8_t * dst = state->data;
 
-    if ( exe_size < 0x800 ) return -1;
-
-    uint32_t addr = psx->exec.t_addr;
-    uint32_t size = exe_size - 0x800;
-
-    addr &= 0x1fffff;
-    if ( ( addr < 0x10000 ) || ( size > 0x1f0000 ) || ( addr + size > 0x200000 ) ) return -1;
-
-    void * pIOP = psx_get_iop_state( state->emu );
-    iop_upload_to_ram( pIOP, addr, exe + 0x800, size );
-
-    if ( !state->refresh )
-    {
-        if (!strncasecmp((const char *) exe + 113, "Japan", 5)) state->refresh = 60;
-        else if (!strncasecmp((const char *) exe + 113, "Europe", 6)) state->refresh = 50;
-        else if (!strncasecmp((const char *) exe + 113, "North America", 13)) state->refresh = 60;
+    if ( state->data_size < 4 ) {
+        state->data = dst = malloc( exe_size );
+        state->data_size = exe_size;
+        memcpy( dst, exe, exe_size );
+        return 0;
     }
 
-    if ( state->first )
+    uint32_t dst_start = *(uint32_t*)dst;
+    uint32_t src_start = *(uint32_t*)exe;
+    dst_start &= 0x7fffff;
+    src_start &= 0x7fffff;
+    uint32_t dst_len = state->data_size - 4;
+    uint32_t src_len = exe_size - 4;
+    if ( dst_len > 0x800000 ) dst_len = 0x800000;
+    if ( src_len > 0x800000 ) src_len = 0x800000;
+
+    if ( src_start < dst_start )
     {
-        void * pR3000 = iop_get_r3000_state( pIOP );
-        r3000_setreg(pR3000, R3000_REG_PC, psx->exec.pc0 );
-        r3000_setreg(pR3000, R3000_REG_GEN+29, psx->exec.s_ptr );
-        state->first = 0;
+        uint32_t diff = dst_start - src_start;
+        state->data_size = dst_len + 4 + diff;
+        state->data = dst = realloc( dst, state->data_size );
+        memmove( dst + 4 + diff, dst + 4, dst_len );
+        memset( dst + 4, 0, diff );
+        dst_len += diff;
+        dst_start = src_start;
+        *(uint32_t*)dst = dst_start;
     }
+    if ( ( src_start + src_len ) > ( dst_start + dst_len ) )
+    {
+        uint32_t diff = ( src_start + src_len ) - ( dst_start + dst_len );
+        state->data_size = dst_len + 4 + diff;
+        state->data = dst = realloc( dst, state->data_size );
+        memset( dst + 4 + dst_len, 0, diff );
+    }
+
+    memcpy( dst + 4 + ( src_start - dst_start ), exe + 4, src_len );
 
     return 0;
 }
@@ -346,132 +322,83 @@ const psf_file_callbacks psf_file_system =
     psf_file_ftell
 };
 
-static int EMU_CALL virtual_readfile(void *context, const char *path, int offset, char *buffer, int length)
-{
-    return psf2fs_virtual_readfile(context, path, offset, buffer, length);
-}
-
 typedef struct {
     DB_fileinfo_t info;
     const char *path;
     void *emu;
-    void *psf2fs;
+    int psf_version;
     int samples_played;
     int samples_to_play;
     int samples_to_fade;
-} midi_info_t;
+} ht_info_t;
 
 DB_fileinfo_t *
-he_open (uint32_t hints) {
-    DB_fileinfo_t *_info = (DB_fileinfo_t *)malloc (sizeof (midi_info_t));
-    memset (_info, 0, sizeof (midi_info_t));
+ht_open (uint32_t hints) {
+    DB_fileinfo_t *_info = (DB_fileinfo_t *)malloc (sizeof (ht_info_t));
+    memset (_info, 0, sizeof (ht_info_t));
     return _info;
 }
 
 int
-he_init (DB_fileinfo_t *_info, DB_playItem_t *it) {
-    midi_info_t *info = (midi_info_t *)_info;
+ht_init (DB_fileinfo_t *_info, DB_playItem_t *it) {
+    ht_info_t *info = (ht_info_t *)_info;
 
     deadbeef->pl_lock ();
     const char * uri = info->path = strdup( deadbeef->pl_find_meta (it, ":URI") );
     deadbeef->pl_unlock ();
     int psf_version = psf_load( uri, &psf_file_system, 0, 0, 0, 0, 0 );
     if (psf_version < 0) {
-        trace ("he: failed to open %s\n", uri);
+        trace ("ht: failed to open %s\n", uri);
         return -1;
-    }
-
-    char he_bios_path[PATH_MAX];
-
-    if ( !bios_get_imagesize() )
-    {
-        deadbeef->conf_get_str("he.bios", "", he_bios_path, PATH_MAX);
-
-        if ( !*he_bios_path ) {
-            trace( "he: no BIOS set\n" );
-            return -1;
-        }
-
-        DB_FILE * f = deadbeef->fopen( he_bios_path );
-        if ( !f ) {
-            trace( "he: failed to open bios %s\n", he_bios_path );
-            return -1;
-        }
-
-        size_t ps2_bios_size = deadbeef->fgetlength( f );
-        if ( ps2_bios_size != 0x400000 ) {
-            deadbeef->fclose( f );
-            trace( "he: bios is wrong size\n" );
-            return -1;
-        }
-
-        void * ps2_bios = malloc( 0x400000 );
-        if ( !ps2_bios ) {
-            deadbeef->fclose( f );
-            trace( "he: out of memory\n" );
-            return -1;
-        }
-
-        if ( deadbeef->fread( ps2_bios, 1, 0x400000, f ) < 0x400000 ) {
-            free( ps2_bios );
-            deadbeef->fclose( f );
-            trace( "he: error reading bios\n" );
-            return -1;
-        }
-
-        deadbeef->fclose( f );
-
-        int bios_size = 0x400000;
-        void * he_bios = mkhebios_create( ps2_bios, &bios_size );
-
-        trace( "he: fucko - %p, %p, %u\n", ps2_bios, he_bios, bios_size );
-
-        free( ps2_bios );
-
-        if ( !he_bios )
-        {
-            trace( "he: error processing bios\n" );
-            return -1;
-        }
-
-        bios_set_image( he_bios, bios_size );
-
-        psx_init();
     }
 
     struct psf_load_state state;
     memset( &state, 0, sizeof(state) );
 
-    state.first = 1;
-
-    info->emu = state.emu = malloc( psx_get_state_size( psf_version ) );
-    if ( !state.emu ) {
-        trace( "he: out of memory\n" );
+    if ( psf_load( uri, &psf_file_system, psf_version, sdsf_load, &state, psf_info_meta, &state ) <= 0 ) {
+        if ( state.data ) free( state.data );
+        trace( "ht: invalid PSF file\n" );
         return -1;
     }
 
-    psx_clear_state( state.emu, psf_version );
-
-    if ( psf_version == 1 ) {
-        if ( psf_load( uri, &psf_file_system, 1, psf1_load, &state, psf_info_meta, &state ) <= 0 ) {
-            trace( "he: invalid PSF file\n" );
-            return -1;
-        }
-    } else if ( psf_version == 2 ) {
-        info->psf2fs = psf2fs_create();
-        if ( !info->psf2fs ) {
-            trace( "he: out of memory\n" );
-            return -1;
-        }
-        if ( psf_load( uri, &psf_file_system, 2, psf2fs_load_callback, info->psf2fs, psf_info_meta, &state ) <= 0 ) {
-            trace( "he: invalid PSF file\n" );
-            return -1;
-        }
-        psx_set_readfile( info->emu, virtual_readfile, info->psf2fs );
+    info->emu = malloc( sega_get_state_size( psf_version - 0x10 ) );
+    if ( !info->emu ) {
+        trace( "ht: out of memory\n" );
+        if ( state.data ) free( state.data );
+        return -1;
     }
 
-    if ( state.refresh )
-        psx_set_refresh( info->emu, state.refresh );
+    sega_clear_state( info->emu, psf_version - 0x10 );
+
+    sega_enable_dry( info->emu, 1 );
+    sega_enable_dsp( info->emu, 1 );
+
+    sega_enable_dsp_dynarec( info->emu, 1 );
+
+    if ( 1 )
+    {
+        void * yam = 0;
+        if ( psf_version == 0x12 )
+        {
+            void * dcsound = sega_get_dcsound_state( info->emu );
+            yam = dcsound_get_yam_state( dcsound );
+        }
+        else
+        {
+            void * satsound = sega_get_satsound_state( info->emu );
+            yam = satsound_get_yam_state( satsound );
+        }
+        if ( yam ) yam_prepare_dynacode( yam );
+    }
+
+    uint32_t start  = *(uint32_t*) state.data;
+    uint32_t length = state.data_size;
+    const uint32_t max_length = ( psf_version == 0x12 ) ? 0x800000 : 0x80000;
+    if ( ( start + ( length - 4 ) ) > max_length ) {
+        length = max_length - start + 4;
+    }
+    sega_upload_program( info->emu, state.data, length );
+    free( state.data );
 
     int tag_song_ms = state.tag_song_ms;
     int tag_fade_ms = state.tag_fade_ms;
@@ -482,13 +409,15 @@ he_init (DB_fileinfo_t *_info, DB_playItem_t *it) {
         tag_fade_ms =            10   * 1000;
     }
 
-    const int srate = psf_version == 2 ? 48000 : 44100;
+    info->psf_version = psf_version;
+
+    const int srate = 44100;
 
     info->samples_played = 0;
     info->samples_to_play = (uint64_t)tag_song_ms * (uint64_t)srate / 1000;
     info->samples_to_fade = (uint64_t)tag_fade_ms * (uint64_t)srate / 1000;
 
-    _info->plugin = &he_plugin;
+    _info->plugin = &ht_plugin;
     _info->fmt.channels = 2;
     _info->fmt.bps = 16;
     _info->fmt.samplerate = srate;
@@ -499,14 +428,25 @@ he_init (DB_fileinfo_t *_info, DB_playItem_t *it) {
 }
 
 void
-he_free (DB_fileinfo_t *_info) {
-    midi_info_t *info = (midi_info_t *)_info;
+ht_free (DB_fileinfo_t *_info) {
+    ht_info_t *info = (ht_info_t *)_info;
     if (info) {
-        if (info->psf2fs) {
-            psf2fs_delete( info->psf2fs );
-            info->psf2fs = NULL;
-        }
         if (info->emu) {
+            if ( 1 )
+            {
+                void * yam = 0;
+                if ( info->psf_version == 0x12 )
+                {
+                    void * dcsound = sega_get_dcsound_state( info->emu );
+                    yam = dcsound_get_yam_state( dcsound );
+                }
+                else
+                {
+                    void * satsound = sega_get_satsound_state( info->emu );
+                    yam = satsound_get_yam_state( satsound );
+                }
+                if ( yam ) yam_unprepare_dynacode( yam );
+            }
             free (info->emu);
             info->emu = NULL;
         }
@@ -519,8 +459,8 @@ he_free (DB_fileinfo_t *_info) {
 }
 
 int
-he_read (DB_fileinfo_t *_info, char *bytes, int size) {
-    midi_info_t *info = (midi_info_t *)_info;
+ht_read (DB_fileinfo_t *_info, char *bytes, int size) {
+    ht_info_t *info = (ht_info_t *)_info;
     short * samples = (short *) bytes;
     uint32_t sample_count = size / ( 2 * sizeof(short) );
 
@@ -528,8 +468,8 @@ he_read (DB_fileinfo_t *_info, char *bytes, int size) {
         return -1;
     }
 
-    if ( psx_execute( info->emu, 0x7fffffff, samples, &sample_count, 0 ) < 0 ) {
-        trace ( "he: execution error\n" );
+    if ( sega_execute( info->emu, 0x7fffffff, samples, &sample_count ) < 0 ) {
+        trace ( "ht: execution error\n" );
         return -1;
     }
 
@@ -557,39 +497,42 @@ he_read (DB_fileinfo_t *_info, char *bytes, int size) {
 }
 
 int
-he_seek_sample (DB_fileinfo_t *_info, int sample) {
-    midi_info_t *info = (midi_info_t *)_info;
+ht_seek_sample (DB_fileinfo_t *_info, int sample) {
+    ht_info_t *info = (ht_info_t *)_info;
     unsigned long int s = sample;
     if (s < info->samples_played) {
+
         struct psf_load_state state;
         memset( &state, 0, sizeof(state) );
 
-        state.emu = info->emu;
-
-        if ( !info->psf2fs ) {
-            psx_clear_state( info->emu, 1 );
-            if ( psf_load( info->path, &psf_file_system, 1, psf1_load, &state, psf_info_meta, &state ) <= 0 ) {
-                trace( "he: invalid PSF file\n" );
-                return -1;
-            }
-        } else {
-            psx_clear_state( info->emu, 2 );
-            if ( psf_load( info->path, &psf_file_system, 2, 0, 0, psf_info_meta, &state ) <= 0 ) {
-                trace( "he: invalid PSF file\n" );
-                return -1;
-            }
-            psx_set_readfile( info->emu, virtual_readfile, info->psf2fs );
+        if ( psf_load( info->path, &psf_file_system, info->psf_version, sdsf_load, &state, psf_info_meta, &state ) <= 0 ) {
+            if ( state.data ) free( state.data );
+            trace( "ht: invalid PSF file\n" );
+            return -1;
         }
 
-        if ( state.refresh )
-            psx_set_refresh( info->emu, state.refresh );
+        sega_clear_state( info->emu, info->psf_version - 0x10 );
+
+        sega_enable_dry( info->emu, 1 );
+        sega_enable_dsp( info->emu, 1 );
+
+        sega_enable_dsp_dynarec( info->emu, 1 );
+
+        uint32_t start  = *(uint32_t*) state.data;
+        uint32_t length = state.data_size;
+        const uint32_t max_length = ( info->psf_version == 0x12 ) ? 0x800000 : 0x80000;
+        if ( ( start + ( length - 4 ) ) > max_length ) {
+            length = max_length - start + 4;
+        }
+        sega_upload_program( info->emu, state.data, length );
+        free( state.data );
 
         info->samples_played = 0;
     }
     while ( info->samples_played < s ) {
         int to_skip = s - info->samples_played;
         if ( to_skip > 32768 ) to_skip = 1024;
-        if ( he_read( _info, NULL, to_skip * 2 * sizeof(short) ) < 0 ) {
+        if ( ht_read( _info, NULL, to_skip * 2 * sizeof(short) ) < 0 ) {
             return -1;
         }
     }
@@ -598,8 +541,8 @@ he_seek_sample (DB_fileinfo_t *_info, int sample) {
 }
 
 int
-he_seek (DB_fileinfo_t *_info, float time) {
-    return he_seek_sample (_info, time * _info->fmt.samplerate);
+ht_seek (DB_fileinfo_t *_info, float time) {
+    return ht_seek_sample (_info, time * _info->fmt.samplerate);
 }
 
 static const char *
@@ -630,7 +573,7 @@ convstr (const char* str, int sz, char *out, int out_sz) {
 }
 
 DB_playItem_t *
-he_insert (ddb_playlist_t *plt, DB_playItem_t *after, const char *fname) {
+ht_insert (ddb_playlist_t *plt, DB_playItem_t *after, const char *fname) {
     DB_playItem_t *it = NULL;
 
     struct psf_load_state state;
@@ -641,7 +584,7 @@ he_insert (ddb_playlist_t *plt, DB_playItem_t *after, const char *fname) {
     if ( psf_version < 0 )
         return after;
 
-    if ( psf_version != 1 && psf_version != 2 )
+    if ( psf_version != 0x11 && psf_version != 0x12 )
         return after;
 
     int tag_song_ms = state.tag_song_ms;
@@ -653,7 +596,7 @@ he_insert (ddb_playlist_t *plt, DB_playItem_t *after, const char *fname) {
         tag_fade_ms =            10   * 1000;
     }
 
-    it = deadbeef->pl_item_alloc_init (fname, he_plugin.plugin.id);
+    it = deadbeef->pl_item_alloc_init (fname, ht_plugin.plugin.id);
 
     char junk_buffer[2][1024];
 
@@ -693,35 +636,33 @@ he_insert (ddb_playlist_t *plt, DB_playItem_t *after, const char *fname) {
 }
 
 int
-he_start (void) {
+ht_start (void) {
+    sega_init();
     return 0;
 }
 
 int
-he_stop (void) {
+ht_stop (void) {
     return 0;
 }
 
 DB_plugin_t *
-he_load (DB_functions_t *api) {
+ht_load (DB_functions_t *api) {
     deadbeef = api;
-    return DB_PLUGIN (&he_plugin);
+    return DB_PLUGIN (&ht_plugin);
 }
 
-static const char *exts[] = { "psf", "minipsf", "psf2", "minipsf2", NULL };
+static const char *exts[] = { "ssf", "minissf", "dsf", "minidsf", NULL };
 
-static const char settings_dlg[] =
-    "property \"PS2 BIOS image\" file he.bios \"\";"
-;
 // define plugin interface
-DB_decoder_t he_plugin = {
+DB_decoder_t ht_plugin = {
     .plugin.api_vmajor = 1,
     .plugin.api_vminor = 0,
     .plugin.type = DB_PLUGIN_DECODER,
     .plugin.version_major = 1,
     .plugin.version_minor = 0,
-    .plugin.name = "Highly Experimental PSF player",
-    .plugin.descr = "PSF and PSF2 player based on Neill Corlett's Highly Experimental.",
+    .plugin.name = "Highly Theoretical SSF/DSF player",
+    .plugin.descr = "SSF and DSF player based on Neill Corlett's Highly Theoretical.",
     .plugin.copyright = 
         "Copyright (C) 2003-2012 Chris Moeller <kode54@gmail.com>\n"
         "Copyright (C) 2003-2012 Neill Corlett <neill@neillcorlett.com>\n"
@@ -741,16 +682,15 @@ DB_decoder_t he_plugin = {
         "Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.\n"
     ,
     .plugin.website = "http://github.com/kode54",
-    .plugin.start = he_start,
-    .plugin.stop = he_stop,
-    .plugin.id = "he",
-    .plugin.configdialog = settings_dlg,
-    .open = he_open,
-    .init = he_init,
-    .free = he_free,
-    .read = he_read,
-    .seek = he_seek,
-    .seek_sample = he_seek_sample,
-    .insert = he_insert,
+    .plugin.start = ht_start,
+    .plugin.stop = ht_stop,
+    .plugin.id = "ht",
+    .open = ht_open,
+    .init = ht_init,
+    .free = ht_free,
+    .read = ht_read,
+    .seek = ht_seek,
+    .seek_sample = ht_seek_sample,
+    .insert = ht_insert,
     .exts = exts,
 };
