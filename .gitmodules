@@ -1,3 +1,6 @@
 [submodule "SegaCore"]
 	path = SegaCore
 	url = git@github.com:kode54/Highly_Theoretical.git
+[submodule "psflib"]
+	path = psflib
+	url = git@github.com:kode54/psflib.git
