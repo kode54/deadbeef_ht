@@ -50,6 +50,22 @@ static DB_functions_t *deadbeef;
 
 #define BORK_TIME 0xC0CAC01A
 
+inline unsigned get_le32( void const* p )
+{
+    return  (unsigned) ((unsigned char const*) p) [3] << 24 |
+            (unsigned) ((unsigned char const*) p) [2] << 16 |
+            (unsigned) ((unsigned char const*) p) [1] <<  8 |
+            (unsigned) ((unsigned char const*) p) [0];
+}
+
+inline void set_le32( void* p, unsigned n )
+{
+    ((unsigned char*) p) [0] = (unsigned char) n;
+    ((unsigned char*) p) [1] = (unsigned char) (n >> 8);
+    ((unsigned char*) p) [2] = (unsigned char) (n >> 16);
+    ((unsigned char*) p) [3] = (unsigned char) (n >> 24);
+}
+
 static unsigned long parse_time_crap(const char *input)
 {
     if (!input) return BORK_TIME;
@@ -253,8 +269,8 @@ int sdsf_load(void * context, const uint8_t * exe, size_t exe_size,
         return 0;
     }
 
-    uint32_t dst_start = *(uint32_t*)dst;
-    uint32_t src_start = *(uint32_t*)exe;
+    uint32_t dst_start = get_le32( dst );
+    uint32_t src_start = get_le32( exe );
     dst_start &= 0x7fffff;
     src_start &= 0x7fffff;
     uint32_t dst_len = state->data_size - 4;
@@ -271,7 +287,7 @@ int sdsf_load(void * context, const uint8_t * exe, size_t exe_size,
         memset( dst + 4, 0, diff );
         dst_len += diff;
         dst_start = src_start;
-        *(uint32_t*)dst = dst_start;
+        set_le32( dst, dst_start );
     }
     if ( ( src_start + src_len ) > ( dst_start + dst_len ) )
     {
