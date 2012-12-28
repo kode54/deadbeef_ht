@@ -615,11 +615,10 @@ ht_insert (ddb_playlist_t *plt, DB_playItem_t *after, const char *fname) {
             }
         } else {
             if ( !state.utf8 ) {
-                convstr( tag->name, strlen( tag->name ), junk_buffer[0], 1023 );
-                convstr( tag->value, strlen( tag->value ), junk_buffer[1], 1023 );
                 junk_buffer[0][ 1023 ] = '\0';
                 junk_buffer[1][ 1023 ] = '\0';
-                deadbeef->pl_add_meta (it, junk_buffer[0], junk_buffer[1]);
+                deadbeef->pl_add_meta (it, convstr( tag->name, strlen( tag->name ), junk_buffer[0], 1023 ),
+                        convstr( tag->value, strlen( tag->value ), junk_buffer[1], 1023 ));
             } else {
                 deadbeef->pl_add_meta (it, tag->name, tag->value);
             }
